@@ -259,28 +259,24 @@ class MemoryStore:
         return ",".join(seen)
 
     def _find_near_duplicate(self, content: str, category: str = None) -> dict | None:
-        """Search for a near-duplicate fact via FTS5 + Jaccard threshold.
-        Returns the matching fact row dict, or None."""
+        """Search for a near-duplicate fact across ALL categories via FTS5 + Jaccard.
+        A fact is the same fact regardless of which category bucket it's in.
+        Returns the matching fact row dict (with 'jaccard' key), or None."""
         query_tokens = self._tokenize_set(content)
         if not query_tokens:
             return None
-        # FTS5 search on the new content to get candidates
+        # FTS5 search on the new content to get candidates — no category filter
         fts_query = " ".join(f'"{t}"' for t in content.split() if t)
         if not fts_query:
             return None
-        params = [fts_query]
-        category_clause = ""
-        if category:
-            category_clause = "AND f.category = ?"
-            params.append(category)
-        sql = f"""
+        sql = """
             SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score
             FROM facts f
             JOIN facts_fts fts ON fts.rowid = f.fact_id
-            WHERE facts_fts MATCH ? {category_clause}
+            WHERE facts_fts MATCH ?
             LIMIT 20
         """
-        rows = self._conn.execute(sql, params).fetchall()
+        rows = self._conn.execute(sql, [fts_query]).fetchall()
         best = None
         best_score = 0.0
         for row in rows:
@@ -295,16 +291,19 @@ class MemoryStore:
         return None
 
     def add_fact(self, content: str, category: str = "general", tags: str = "") -> dict:
-        """Add a fact, with fuzzy dedup detection.
-        Returns: {"fact_id", "was_duplicate", "duplicate_of", "merged_tags"}."""
+        """Add a fact, with fuzzy cross-category dedup detection.
+        Returns: {"fact_id", "was_duplicate", "duplicate_of", "merged_tags",
+                  "jaccard", "existing_category", "category_mismatch"}."""
         with self._lock:
             content = content.strip()
             if not content:
                 raise ValueError("content must not be empty")
-            # Check for near-duplicate BEFORE attempting insert
+            # Check for near-duplicate across ALL categories BEFORE attempting insert
             near_dup = self._find_near_duplicate(content, category=category)
             if near_dup is not None:
                 existing_id = int(near_dup["fact_id"])
+                existing_category = near_dup["category"]
+                category_mismatch = existing_category != category
                 # Merge tags: union of existing and new
                 merged = self._merge_tags(near_dup["tags"], tags)
                 tags_changed = merged != near_dup["tags"]
@@ -315,13 +314,15 @@ class MemoryStore:
                     (merged, new_trust, existing_id),
                 )
                 self._conn.commit()
-                self._rebuild_bank(near_dup["category"])
+                self._rebuild_bank(existing_category)
                 return {
                     "fact_id": existing_id,
                     "was_duplicate": True,
                     "duplicate_of": existing_id,
                     "merged_tags": tags_changed,
                     "jaccard": near_dup["jaccard"],
+                    "existing_category": existing_category,
+                    "category_mismatch": category_mismatch,
                 }
             # No near-dup found — proceed with insert
             try:
@@ -333,14 +334,19 @@ class MemoryStore:
                 fact_id = cur.lastrowid
             except sqlite3.IntegrityError:
                 # Exact string match (UNIQUE constraint) — still a dup
-                row = self._conn.execute("SELECT fact_id FROM facts WHERE content = ?", (content,)).fetchone()
+                row = self._conn.execute(
+                    "SELECT fact_id, category FROM facts WHERE content = ?", (content,)
+                ).fetchone()
                 existing_id = int(row["fact_id"])
+                existing_category = row["category"]
                 return {
                     "fact_id": existing_id,
                     "was_duplicate": True,
                     "duplicate_of": existing_id,
                     "merged_tags": False,
                     "jaccard": 1.0,
+                    "existing_category": existing_category,
+                    "category_mismatch": existing_category != category,
                 }
             for name in self._extract_entities(content):
                 entity_id = self._resolve_entity(name)
@@ -352,6 +358,8 @@ class MemoryStore:
                 "was_duplicate": False,
                 "duplicate_of": None,
                 "merged_tags": False,
+                "existing_category": None,
+                "category_mismatch": False,
             }
 
     def search_facts(self, query: str, category=None, min_trust=0.3, limit=10):
@@ -827,7 +835,11 @@ def handle_fact_store(args: dict) -> str:
             msg = f"Near-duplicate of fact #{result['duplicate_of']} (jaccard={result.get('jaccard', 1.0):.2f})"
             if result["merged_tags"]:
                 msg += " — tags merged"
-            msg += ". Use 'update' action to extend content if needed."
+            if result.get("category_mismatch"):
+                msg += f" — category mismatch: tried {args.get('category', 'general')} but existing is {result['existing_category']}"
+                msg += ". Use 'update' to change category if the new one is correct."
+            else:
+                msg += ". Use 'update' action to extend content if needed."
             return json.dumps({**result, "status": status, "message": msg})
         return json.dumps({**result, "status": "added"})
     elif action == "search":
@@ -910,7 +922,7 @@ def main():
                     "result": {
                         "protocolVersion": "2024-11-05",
                         "capabilities": {"tools": {"listChanged": False}},
-                        "serverInfo": {"name": "holographic-mcp", "version": "1.1.0"},
+                        "serverInfo": {"name": "holographic-mcp", "version": "1.1.1"},
                     },
                 })
             elif method == "notifications/initialized":

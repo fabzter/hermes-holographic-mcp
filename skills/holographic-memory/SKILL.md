@@ -56,22 +56,26 @@ fact_store(action="add", content="Project uses DASHSCOPE for LLM inference", cat
 
 ## Auto-dedup on add
 
-The `add` action automatically detects near-duplicates before inserting. It uses FTS5 to find candidates, then computes Jaccard similarity on token sets. If similarity >= 0.65 (configurable via `HOLOGRAPHIC_DEDUP_THRESHOLD` env var):
+The `add` action automatically detects near-duplicates **across all categories** before inserting. A fact is the same fact regardless of which category bucket it's filed in. Dedup uses FTS5 to find candidates, then computes Jaccard similarity on token sets. If similarity >= 0.65 (configurable via `HOLOGRAPHIC_DEDUP_THRESHOLD` env var):
 
 - **No new fact is inserted** — the existing fact is kept
 - **Tags are merged** (union of existing + new tags)
 - **Trust is boosted** by +0.02 (seen twice = slightly more credible)
 - **`updated_at` is touched**
-- The response includes `was_duplicate: true`, `duplicate_of: <id>`, `jaccard: <score>`
+- The response includes `was_duplicate: true`, `duplicate_of: <id>`, `jaccard: <score>`, `existing_category`, `category_mismatch`
 
 ### When you get a `was_duplicate: true` response
 
-1. **If the new fact had MORE information** than the existing one → use `update` to extend the content:
+1. **If `category_mismatch: true`** → you tried to file the fact under a different category than the existing one. Decide which category is correct and use `update` to change it if needed:
+   ```
+   fact_store(action="update", fact_id=<duplicate_of>, category="<correct_category>")
+   ```
+2. **If the new fact had MORE information** than the existing one → use `update` to extend the content:
    ```
    fact_store(action="update", fact_id=<duplicate_of>, content="<richer version>")
    ```
-2. **If it was a true duplicate** → no action needed. Tags were merged, trust boosted.
-3. **If it was a different fact that happened to share many tokens** → lower the threshold by setting `HOLOGRAPHIC_DEDUP_THRESHOLD=0.8` or rephrase your new fact to be more distinct.
+3. **If it was a true duplicate** → no action needed. Tags were merged, trust boosted.
+4. **If it was a different fact that happened to share many tokens** → lower the threshold by setting `HOLOGRAPHIC_DEDUP_THRESHOLD=0.8` or rephrase your new fact to be more distinct.
 
 ### When to use `update` vs `add`
 
