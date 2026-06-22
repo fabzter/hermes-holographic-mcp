@@ -13,7 +13,7 @@ This skill provides access to the Holographic memory MCP server — a local SQLi
 
 | Action | Description | Required args | Optional args |
 |--------|-------------|---------------|---------------|
-| `add` | Store a fact | `content` | `category`, `tags` |
+| `add` | Store a fact (auto-dedup) | `content` | `category`, `tags` |
 | `search` | Keyword lookup | `query` | `category`, `min_trust`, `limit` |
 | `probe` | ALL facts about an entity | `entity` | `category`, `limit` |
 | `related` | Structural adjacency to entity | `entity` | `category`, `limit` |
@@ -53,6 +53,31 @@ fact_store(action="reason", entities=["Fabzter", "backend"])
 fact_store(action="add", content="User prefers Python 3.13", category="user_pref")
 fact_store(action="add", content="Project uses DASHSCOPE for LLM inference", category="project", tags="llm,alibaba")
 ```
+
+## Auto-dedup on add
+
+The `add` action automatically detects near-duplicates before inserting. It uses FTS5 to find candidates, then computes Jaccard similarity on token sets. If similarity >= 0.65 (configurable via `HOLOGRAPHIC_DEDUP_THRESHOLD` env var):
+
+- **No new fact is inserted** — the existing fact is kept
+- **Tags are merged** (union of existing + new tags)
+- **Trust is boosted** by +0.02 (seen twice = slightly more credible)
+- **`updated_at` is touched**
+- The response includes `was_duplicate: true`, `duplicate_of: <id>`, `jaccard: <score>`
+
+### When you get a `was_duplicate: true` response
+
+1. **If the new fact had MORE information** than the existing one → use `update` to extend the content:
+   ```
+   fact_store(action="update", fact_id=<duplicate_of>, content="<richer version>")
+   ```
+2. **If it was a true duplicate** → no action needed. Tags were merged, trust boosted.
+3. **If it was a different fact that happened to share many tokens** → lower the threshold by setting `HOLOGRAPHIC_DEDUP_THRESHOLD=0.8` or rephrase your new fact to be more distinct.
+
+### When to use `update` vs `add`
+
+- **`add`** = new fact. Let dedup catch accidents.
+- **`update`** = you already know the fact_id and want to change content/tags/trust.
+- **Don't search-then-add** as a manual dedup dance — just `add` and let the system tell you if it was a dup.
 
 **Rate facts after using them to train trust scores:**
 

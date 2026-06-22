@@ -204,6 +204,8 @@ _HELPFUL_DELTA = 0.05
 _UNHELPFUL_DELTA = -0.10
 _TRUST_MIN = 0.0
 _TRUST_MAX = 1.0
+_DEDUP_TRUST_BOOST = 0.02
+_DEDUP_THRESHOLD = float(os.environ.get("HOLOGRAPHIC_DEDUP_THRESHOLD", "0.65"))
 
 _RE_CAPITALIZED = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b')
 _RE_DOUBLE_QUOTE = re.compile(r'"([^"]+)"')
@@ -238,11 +240,90 @@ class MemoryStore:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
         self._conn.commit()
 
-    def add_fact(self, content: str, category: str = "general", tags: str = "") -> int:
+    def _tokenize_set(self, text: str) -> set:
+        """Tokenize text into a lowercase set, stripping punctuation."""
+        return {t.strip(".,!?;:\"'()[]{}").lower() for t in text.split() if t.strip(".,!?;:\"'()[]{}")}
+
+    def _jaccard(self, a: set, b: set) -> float:
+        if not a or not b:
+            return 0.0
+        return len(a & b) / len(a | b)
+
+    def _merge_tags(self, existing: str, new: str) -> str:
+        """Union of two comma-separated tag strings, deduped, order-preserving."""
+        seen = {}
+        for tag in (existing + "," + new).split(","):
+            tag = tag.strip()
+            if tag and tag not in seen:
+                seen[tag] = True
+        return ",".join(seen)
+
+    def _find_near_duplicate(self, content: str, category: str = None) -> dict | None:
+        """Search for a near-duplicate fact via FTS5 + Jaccard threshold.
+        Returns the matching fact row dict, or None."""
+        query_tokens = self._tokenize_set(content)
+        if not query_tokens:
+            return None
+        # FTS5 search on the new content to get candidates
+        fts_query = " ".join(f'"{t}"' for t in content.split() if t)
+        if not fts_query:
+            return None
+        params = [fts_query]
+        category_clause = ""
+        if category:
+            category_clause = "AND f.category = ?"
+            params.append(category)
+        sql = f"""
+            SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score
+            FROM facts f
+            JOIN facts_fts fts ON fts.rowid = f.fact_id
+            WHERE facts_fts MATCH ? {category_clause}
+            LIMIT 20
+        """
+        rows = self._conn.execute(sql, params).fetchall()
+        best = None
+        best_score = 0.0
+        for row in rows:
+            existing_tokens = self._tokenize_set(row["content"])
+            score = self._jaccard(query_tokens, existing_tokens)
+            if score > best_score:
+                best_score = score
+                best = dict(row)
+        if best is not None and best_score >= _DEDUP_THRESHOLD:
+            best["jaccard"] = best_score
+            return best
+        return None
+
+    def add_fact(self, content: str, category: str = "general", tags: str = "") -> dict:
+        """Add a fact, with fuzzy dedup detection.
+        Returns: {"fact_id", "was_duplicate", "duplicate_of", "merged_tags"}."""
         with self._lock:
             content = content.strip()
             if not content:
                 raise ValueError("content must not be empty")
+            # Check for near-duplicate BEFORE attempting insert
+            near_dup = self._find_near_duplicate(content, category=category)
+            if near_dup is not None:
+                existing_id = int(near_dup["fact_id"])
+                # Merge tags: union of existing and new
+                merged = self._merge_tags(near_dup["tags"], tags)
+                tags_changed = merged != near_dup["tags"]
+                # Small trust boost — we've seen this claim twice
+                new_trust = _clamp_trust(near_dup["trust_score"] + _DEDUP_TRUST_BOOST)
+                self._conn.execute(
+                    "UPDATE facts SET tags = ?, trust_score = ?, updated_at = CURRENT_TIMESTAMP WHERE fact_id = ?",
+                    (merged, new_trust, existing_id),
+                )
+                self._conn.commit()
+                self._rebuild_bank(near_dup["category"])
+                return {
+                    "fact_id": existing_id,
+                    "was_duplicate": True,
+                    "duplicate_of": existing_id,
+                    "merged_tags": tags_changed,
+                    "jaccard": near_dup["jaccard"],
+                }
+            # No near-dup found — proceed with insert
             try:
                 cur = self._conn.execute(
                     "INSERT INTO facts (content, category, tags, trust_score) VALUES (?, ?, ?, ?)",
@@ -251,14 +332,27 @@ class MemoryStore:
                 self._conn.commit()
                 fact_id = cur.lastrowid
             except sqlite3.IntegrityError:
+                # Exact string match (UNIQUE constraint) — still a dup
                 row = self._conn.execute("SELECT fact_id FROM facts WHERE content = ?", (content,)).fetchone()
-                return int(row["fact_id"])
+                existing_id = int(row["fact_id"])
+                return {
+                    "fact_id": existing_id,
+                    "was_duplicate": True,
+                    "duplicate_of": existing_id,
+                    "merged_tags": False,
+                    "jaccard": 1.0,
+                }
             for name in self._extract_entities(content):
                 entity_id = self._resolve_entity(name)
                 self._link_fact_entity(fact_id, entity_id)
             self._compute_hrr_vector(fact_id, content)
             self._rebuild_bank(category)
-            return fact_id
+            return {
+                "fact_id": fact_id,
+                "was_duplicate": False,
+                "duplicate_of": None,
+                "merged_tags": False,
+            }
 
     def search_facts(self, query: str, category=None, min_trust=0.3, limit=10):
         with self._lock:
@@ -681,7 +775,7 @@ FACT_STORE_SCHEMA = {
         "Deep structured memory with algebraic reasoning. "
         "Use for storing and recalling facts about people, projects, preferences, decisions.\n\n"
         "ACTIONS:\n"
-        "• add — Store a fact the user would expect you to remember.\n"
+        "• add — Store a fact. Auto-detects near-duplicates (Jaccard >= 0.65) and merges tags instead of inserting. Returns was_duplicate flag.\n"
         "• search — Keyword lookup.\n"
         "• probe — Entity recall: ALL facts about a person/thing.\n"
         "• related — What connects to an entity? Structural adjacency.\n"
@@ -727,8 +821,15 @@ TOOLS = [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]
 def handle_fact_store(args: dict) -> str:
     action = args["action"]
     if action == "add":
-        fact_id = _store.add_fact(args["content"], category=args.get("category", "general"), tags=args.get("tags", ""))
-        return json.dumps({"fact_id": fact_id, "status": "added"})
+        result = _store.add_fact(args["content"], category=args.get("category", "general"), tags=args.get("tags", ""))
+        if result["was_duplicate"]:
+            status = "duplicate"
+            msg = f"Near-duplicate of fact #{result['duplicate_of']} (jaccard={result.get('jaccard', 1.0):.2f})"
+            if result["merged_tags"]:
+                msg += " — tags merged"
+            msg += ". Use 'update' action to extend content if needed."
+            return json.dumps({**result, "status": status, "message": msg})
+        return json.dumps({**result, "status": "added"})
     elif action == "search":
         results = _retriever.search(args["query"], category=args.get("category"), min_trust=float(args.get("min_trust", _config["min_trust"])), limit=int(args.get("limit", 10)))
         return json.dumps({"results": results, "count": len(results)})
@@ -809,7 +910,7 @@ def main():
                     "result": {
                         "protocolVersion": "2024-11-05",
                         "capabilities": {"tools": {"listChanged": False}},
-                        "serverInfo": {"name": "holographic-mcp", "version": "1.0.0"},
+                        "serverInfo": {"name": "holographic-mcp", "version": "1.1.0"},
                     },
                 })
             elif method == "notifications/initialized":

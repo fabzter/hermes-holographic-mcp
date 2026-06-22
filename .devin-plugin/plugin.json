@@ -1,6 +1,6 @@
 {
   "name": "hermes-holographic-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Holographic memory MCP server for Devin — SQLite + FTS5 + HRR compositional retrieval, trust scoring, entity resolution. Ported from NousResearch/hermes-agent.",
   "author": {
     "name": "fabzter",
