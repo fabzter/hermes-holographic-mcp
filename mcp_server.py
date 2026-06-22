@@ -265,7 +265,10 @@ class MemoryStore:
             query = query.strip()
             if not query:
                 return []
-            params = [query, min_trust]
+            # Escape FTS5 query: wrap each token in double quotes to prevent
+            # column references and operator interpretation (e.g. "luca-edu")
+            fts_query = " ".join(f'"{t}"' for t in query.split() if t)
+            params = [fts_query, min_trust]
             category_clause = ""
             if category:
                 category_clause = "AND f.category = ?"
