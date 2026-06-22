@@ -1,0 +1,64 @@
+{
+  "mcpServers": {
+    "holographic": {
+      "command": "bash",
+      "args": ["$HOME/hermes-holographic-mcp/bin/holographic-mcp"],
+      "transport": "stdio"
+    }
+  },
+  "permissions": {
+    "allow": [
+      "mcp__holographic__*"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/hermes-holographic-mcp/hook.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/hermes-holographic-mcp/hook.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/hermes-holographic-mcp/hook.py",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__holographic__fact_store$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $HOME/hermes-holographic-mcp/hook.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
