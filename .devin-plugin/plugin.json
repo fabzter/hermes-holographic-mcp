@@ -1,0 +1,13 @@
+{
+  "name": "hermes-holographic-mcp",
+  "version": "1.0.0",
+  "description": "Holographic memory MCP server for Devin — SQLite + FTS5 + HRR compositional retrieval, trust scoring, entity resolution. Ported from NousResearch/hermes-agent.",
+  "author": {
+    "name": "fabzter",
+    "email": "faboster@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": ["memory", "holographic", "hrr", "sqlite", "hermes", "mcp"],
+  "homepage": "https://github.com/fabzter/hermes-holographic-mcp",
+  "repository": "https://github.com/fabzter/hermes-holographic-mcp"
+}

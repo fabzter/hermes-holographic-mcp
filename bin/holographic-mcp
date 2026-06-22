@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Wrapper script for holographic-mcp — finds the latest plugin version
+# and runs the MCP server. This allows the MCP config to point to a
+# stable path that survives plugin updates.
+set -e
+
+PLUGIN_CACHE="${HOME}/.local/share/devin/cli/plugins/cache/hermes-holographic-mcp"
+
+# Find the latest version directory
+LATEST=""
+if [ -d "$PLUGIN_CACHE" ]; then
+    LATEST=$(ls -1v "$PLUGIN_CACHE" 2>/dev/null | tail -1)
+fi
+
+if [ -z "$LATEST" ] || [ ! -f "$PLUGIN_CACHE/$LATEST/mcp_server.py" ]; then
+    echo "ERROR: hermes-holographic-mcp plugin not found in cache" >&2
+    exit 1
+fi
+
+exec python3 "$PLUGIN_CACHE/$LATEST/mcp_server.py" "$@"
