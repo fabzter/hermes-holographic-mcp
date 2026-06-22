@@ -20,6 +20,17 @@ DB_PATH = os.environ.get(
 MIN_TRUST = float(os.environ.get("HOLOGRAPHIC_MIN_TRUST", "0.3"))
 MAX_FACTS_INJECT = int(os.environ.get("HOLOGRAPHIC_MAX_INJECT", "5"))
 
+# Reflexion failure memory: tools whose errors are worth recording.
+# Reads/greps/globs rarely produce interesting failures — skip them to reduce noise.
+REFLEXION_TOOLS = {"exec", "edit", "write", "notebook_edit"}
+REFLEXION_MCP_PREFIX = "mcp__"  # all MCP tool errors are interesting
+
+# Background review: every Nth Stop, nudge the agent to spawn a review subagent.
+REVIEW_INTERVAL = int(os.environ.get("HOLOGRAPHIC_REVIEW_INTERVAL", "5"))
+TURNCOUNTER_PATH = str(
+    Path.home() / ".local" / "share" / "devin" / "holographic" / "turn_counter.txt"
+)
+
 # Phrases that signal the user is correcting/updating/changing something
 # When these appear alongside a matching fact, the agent should UPDATE or DELETE
 CORRECTION_SIGNALS = [
@@ -135,6 +146,104 @@ def detect_correction_signal(prompt):
         if signal in prompt_lower:
             matched_signals.append(signal)
     return matched_signals
+
+
+# ---------------------------------------------------------------------------
+# Reflexion failure memory
+# ---------------------------------------------------------------------------
+
+def is_reflexion_worthy(tool_name):
+    """Should we record failures from this tool?"""
+    if tool_name in REFLEXION_TOOLS:
+        return True
+    if tool_name.startswith(REFLEXION_MCP_PREFIX):
+        return True
+    return False
+
+
+def extract_error(tool_response):
+    """Extract error message from tool_response if the tool failed."""
+    if not isinstance(tool_response, dict):
+        return None
+    success = tool_response.get("success")
+    error = tool_response.get("error")
+    # Explicit failure
+    if success is False and error:
+        return error
+    # Error field present even if success not set
+    if error and str(error).strip().lower() not in ("", "none", "null"):
+        return str(error)
+    return None
+
+
+def handle_tool_error(tool_name, tool_input, error_msg):
+    """Inject a reflexion directive when a tool fails.
+
+    The agent has the full conversational context to fill in [consequence]
+    and [defense]. The hook only provides [trigger] and [error].
+    """
+    # Summarize tool_input for the trigger (avoid dumping huge payloads)
+    if isinstance(tool_input, dict):
+        # Pick the most informative field
+        summary = (
+            tool_input.get("command")
+            or tool_input.get("file_path")
+            or tool_input.get("pattern")
+            or tool_input.get("query")
+            or tool_input.get("action")
+            or json.dumps(tool_input)[:120]
+        )
+    else:
+        summary = str(tool_input)[:120]
+
+    # Truncate error message
+    error_snippet = str(error_msg)[:300]
+
+    print(json.dumps({
+        "add_context": (
+            "## Reflexion: Tool Failure Detected\n"
+            f"Tool `{tool_name}` failed.\n"
+            f"- **Trigger**: {tool_name}({summary})\n"
+            f"- **Error**: {error_snippet}\n\n"
+            "If this failure reveals a non-obvious lesson (not a trivial typo), "
+            "store a reflexion entry so you don't repeat the mistake:\n"
+            "```\n"
+            "fact_store(\n"
+            "    action='add',\n"
+            f"    content='REFLEXION: trigger={tool_name}({summary[:60]}) | "
+            f"error={error_snippet[:120]} | consequence=<what happened> | "
+            f"defense=<how to avoid> |',\n"
+            "    category='general',\n"
+            "    tags='reflexion,failure'\n"
+            ")\n"
+            "```\n"
+            "Fill in <consequence> and <defense> from context. "
+            "Skip trivial failures (typos, missing file on first try, etc.)."
+        )
+    }))
+
+
+# ---------------------------------------------------------------------------
+# Turn counter for background review
+# ---------------------------------------------------------------------------
+
+def read_turn_counter():
+    """Read the stop-turn counter. Returns 0 if missing/corrupt."""
+    try:
+        with open(TURNCOUNTER_PATH, "r") as f:
+            return int(f.read().strip())
+    except Exception:
+        return 0
+
+
+def write_turn_counter(value):
+    """Persist the counter atomically (best-effort)."""
+    try:
+        os.makedirs(os.path.dirname(TURNCOUNTER_PATH), exist_ok=True)
+        with open(TURNCOUNTER_PATH, "w") as f:
+            f.write(str(value))
+    except Exception:
+        pass  # counter is advisory, not critical
 
 
 def format_facts(facts):
@@ -268,19 +377,20 @@ def handle_user_prompt(prompt):
 
 
 def handle_stop():
-    """Remind agent to store, update, AND delete facts before stopping."""
+    """Remind agent to store/update/delete facts before stopping, and every
+    Nth stop, nudge it to spawn a background review subagent."""
     conn = get_db()
-    if conn is None:
-        return
-
-    total = count_facts(conn)
-    if total == 0:
+    total = count_facts(conn) if conn else 0
+    contradictions = find_contradictions(conn, limit=3) if conn else []
+    if conn:
         conn.close()
-        return
 
-    # Check for unresolved contradictions
-    contradictions = find_contradictions(conn, limit=3)
-    conn.close()
+    # Turn counter for background review
+    turns = read_turn_counter() + 1
+    write_turn_counter(turns)
+    review_due = turns >= REVIEW_INTERVAL
+    if review_due:
+        write_turn_counter(0)  # reset
 
     parts = ["## Memory Check (before stopping)\n"]
 
@@ -299,11 +409,43 @@ def handle_stop():
             f"Resolve before stopping: update or remove the wrong fact."
         )
 
+    if review_due:
+        parts.append(
+            f"\n## Background Review Due (every {REVIEW_INTERVAL} stops)\n"
+            f"It has been {REVIEW_INTERVAL} turns since the last session review. "
+            f"Before stopping, spawn a **background subagent** to review this session:\n"
+            f"```\n"
+            f"run_subagent(\n"
+            f"    title='Session review',\n"
+            f"    task='Review the current Devin session and proactively store knowledge: "
+            f"(1) Extract any new facts the user would expect remembered — preferences, "
+            f"project decisions, tool quirks, people mentioned — and store them with "
+            f"fact_store(action=\\'add\\'). (2) Identify any reusable problem-solving "
+            f"patterns worth saving as a skill. (3) Check for contradictions with existing "
+            f"facts using fact_store(action=\\'contradict\\') and resolve them. (4) Rate "
+            f"any facts you used with fact_feedback. Be conservative — only store what the "
+            f"user would genuinely expect to persist. Skip trivial observations.',\n"
+            f"    profile='subagent_general',\n"
+            f"    is_background=true\n"
+            f")\n"
+            f"```\n"
+            f"You may stop after launching the subagent — it runs in the background."
+        )
+
     print(json.dumps({"add_context": "\n".join(parts)}))
 
 
 def handle_post_tool_use(tool_name, tool_input, tool_response):
-    """After fact_store(add), check for contradictions with existing facts."""
+    """After a tool runs: (1) check fact_store add for contradictions,
+    (2) detect failures on reflexion-worthy tools and inject reflexion directive."""
+    # --- Reflexion: detect tool failures ---
+    error_msg = extract_error(tool_response)
+    if error_msg and is_reflexion_worthy(tool_name):
+        handle_tool_error(tool_name, tool_input, error_msg)
+        # Don't return — fact_store itself might have errored, and we still
+        # want the contradiction check below if it was a successful add.
+
+    # --- Existing: contradiction check after fact_store(add) ---
     if tool_name != "mcp__holographic__fact_store":
         return
 
