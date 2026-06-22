@@ -166,22 +166,14 @@ proc = subprocess.Popen(
 
 def send(msg):
     body = json.dumps(msg)
-    proc.stdin.write(f"Content-Length: {len(body)}\r\n\r\n{body}")
+    proc.stdin.write(body + "\n")
     proc.stdin.flush()
 
 def recv():
-    headers = {}
-    while True:
-        line = proc.stdout.readline()
-        if not line:
-            return None
-        line = line.strip()
-        if not line:
-            break
-        k, v = line.split(":", 1)
-        headers[k.strip().lower()] = v.strip()
-    length = int(headers.get("content-length", 0))
-    return json.loads(proc.stdout.read(length))
+    line = proc.stdout.readline()
+    if not line:
+        return None
+    return json.loads(line.strip())
 
 send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}}})
 r = recv()

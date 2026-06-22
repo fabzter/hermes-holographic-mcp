@@ -776,27 +776,18 @@ def handle_tool_call(name: str, args: dict) -> str:
 
 
 def read_message() -> dict | None:
-    headers = {}
-    while True:
-        line = sys.stdin.readline()
-        if not line:
-            return None
-        line = line.strip()
-        if not line:
-            break
-        if ":" in line:
-            key, val = line.split(":", 1)
-            headers[key.strip().lower()] = val.strip()
-    length = int(headers.get("content-length", 0))
-    if length == 0:
+    line = sys.stdin.readline()
+    if not line:
         return None
-    body = sys.stdin.read(length)
-    return json.loads(body)
+    line = line.strip()
+    if not line:
+        return None
+    return json.loads(line)
 
 
 def write_message(msg: dict):
     body = json.dumps(msg)
-    sys.stdout.write(f"Content-Length: {len(body)}\r\n\r\n{body}")
+    sys.stdout.write(body + "\n")
     sys.stdout.flush()
 
 
@@ -821,7 +812,7 @@ def main():
                         "serverInfo": {"name": "holographic-mcp", "version": "1.0.0"},
                     },
                 })
-            elif method == "initialized":
+            elif method == "notifications/initialized":
                 pass  # notification, no response
             elif method == "tools/list":
                 write_message({

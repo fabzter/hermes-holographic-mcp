@@ -29,10 +29,10 @@ echo "[1] Merging Devin config.json..."
 
 mkdir -p "$(dirname "$DEVIN_CONFIG")"
 
-python3 - "$DEVIN_CONFIG" "$SNIPPET" <<'PYEOF'
+python3 - "$DEVIN_CONFIG" "$SNIPPET" "$HOME" <<'PYEOF'
 import json, sys, os
 
-config_path, snippet_path = sys.argv[1], sys.argv[2]
+config_path, snippet_path, home_dir = sys.argv[1], sys.argv[2], sys.argv[3]
 
 # Load existing config (or create empty)
 if os.path.exists(config_path):
@@ -41,9 +41,11 @@ if os.path.exists(config_path):
 else:
     config = {"version": 1}
 
-# Load snippet
+# Load snippet and expand $HOME to absolute path
+# (Devin passes MCP server args literally — no shell expansion)
 with open(snippet_path) as f:
-    snippet = json.load(f)
+    raw = f.read().replace("$HOME", home_dir)
+    snippet = json.loads(raw)
 
 changed = False
 
