@@ -35,6 +35,7 @@ This skill provides access to the Holographic memory MCP server — a local SQLi
 - `user_pref` — user preferences
 - `project` — project facts
 - `tool` — tool/tech facts
+- `procedural` — learned tool sequences (trigger → tool calls → success criteria)
 - `general` — everything else
 
 ## Usage patterns

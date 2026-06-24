@@ -16,6 +16,7 @@ Your persistent memory is the **Holographic Memory MCP server** (`mcp__holograph
 - **A project decision is made**: "We'll use...", "The project needs..." → `fact_store(action="add", content="...", category="project")`
 - **A tool or tech fact is learned**: "X uses Y", "Z requires W" → `fact_store(action="add", content="...", category="tool")`
 - **A person is mentioned with context**: "Edgar builds auth-service" → `fact_store(action="add", content="...", category="project")`
+- **A complex task succeeds with 5+ tool calls**: store the trigger pattern + tool sequence + success criteria. `fact_store(action="add", content="<trigger> → <tool seq> → <success>", category="procedural")`
 - **You discover something the user would expect you to remember next time** → store it.
 
 ### When to RATE (trains trust scores)
@@ -50,6 +51,6 @@ Your persistent memory is the **Holographic Memory MCP server** (`mcp__holograph
 
 - **Always retrieve before storing.** Don't add duplicates — search first.
 - **Be specific.** "User prefers Python 3.13" is good. "User likes Python" is too vague.
-- **Use categories.** `user_pref`, `project`, `tool`, `general`.
+- **Use categories.** `user_pref`, `project`, `tool`, `procedural`, `general`.
 - **Trust the trust scores.** Facts with trust < 0.3 are probably noise.
 - **Don't store everything.** Store what the user would expect you to remember. Not every sentence.
