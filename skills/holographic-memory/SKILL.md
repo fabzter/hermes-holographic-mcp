@@ -36,6 +36,7 @@ This skill provides access to the Holographic memory MCP server — a local SQLi
 - `project` — project facts
 - `tool` — tool/tech facts
 - `procedural` — learned tool sequences (trigger → tool calls → success criteria)
+- `skill_refinement` — candidates from the skill refinement loop (written by devin-skill-auto-create)
 - `general` — everything else
 
 ## Usage patterns

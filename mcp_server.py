@@ -800,7 +800,7 @@ FACT_STORE_SCHEMA = {
             "entity": {"type": "string", "description": "Entity name for 'probe'/'related'."},
             "entities": {"type": "array", "items": {"type": "string"}, "description": "Entity names for 'reason'."},
             "fact_id": {"type": "integer", "description": "Fact ID for 'update'/'remove'."},
-            "category": {"type": "string", "enum": ["user_pref", "project", "tool", "general", "procedural"], "description": "Conventional bucket. 'procedural' = learned tool sequences (trigger → tools → success)."},
+            "category": {"type": "string", "enum": ["user_pref", "project", "tool", "general", "procedural", "skill_refinement"], "description": "Conventional bucket. 'procedural' = learned tool sequences (trigger → tools → success). 'skill_refinement' = candidates from the skill refinement loop (written by devin-skill-auto-create)."},
             "tags": {"type": "string", "description": "Comma-separated tags."},
             "trust_delta": {"type": "number", "description": "Trust adjustment for 'update'."},
             "min_trust": {"type": "number", "description": "Minimum trust filter (default: 0.3)."},
